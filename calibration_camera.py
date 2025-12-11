@@ -11,41 +11,58 @@ from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 class Detecter:
-    
-    def __init__(
-        self, 
-        def_func,
-        fps
-    ):
+    def __init__(self, def_func, fps, n_frames=5):
+        """
+        def_func: функция перевода y-пикселей в метры
+        fps: частота кадров видео
+        n_frames: пересчитывать скорость каждые n кадров
+        """
         self.def_func = def_func
         self.fps = fps
+        self.n_frames = n_frames
         self.map_cars = {}
 
     def estimate_speed(self, car_id, y, frame: int):
+        """
+        car_id: ID объекта
+        y: центр bbox по вертикали
+        frame: номер кадра
+        """
         if car_id not in self.map_cars:
-            self.map_cars[car_id] = [(y, frame)]
-            return None  # скорость ещё не вычисляется на первом кадре
-        
-        detections = self.map_cars[car_id]
-        prev_y, prev_frame = detections[-1]
-        
-        # Вычисляем расстояния
-        prev_distances = self.def_func(prev_y)
-        distances = self.def_func(y)
-        
-        frame_delta = frame - prev_frame
-        time_delta = frame_delta / self.fps if self.fps > 0 else 1
-        
-        if time_delta == 0:
-            speed = 0
-        else:
-            distance_delta = distances - prev_distances
-            speed = distance_delta / time_delta
+            self.map_cars[car_id] = {
+                "positions": [(y, frame)],
+                "last_frame_calculated": frame,
+                "last_speed": None
+            }
+            return None  # скорость ещё не вычислена на первом кадре
 
-        # Сохраняем текущую позицию
-        self.map_cars[car_id].append((y, frame))
-        
-        return speed
+        car_data = self.map_cars[car_id]
+        car_data["positions"].append((y, frame))
+
+        # Ограничиваем список последних позиций, чтобы не рос бесконечно
+        if len(car_data["positions"]) > self.n_frames + 1:
+            car_data["positions"].pop(0)
+
+        # Проверяем, нужно ли пересчитать скорость
+        if frame - car_data["last_frame_calculated"] >= self.n_frames:
+            # Берем первую и последнюю точку из текущего окна
+            y1, f1 = car_data["positions"][0]
+            y2, f2 = car_data["positions"][-1]
+
+            dist1 = self.def_func(y1)
+            dist2 = self.def_func(y2)
+
+            time_delta = (f2 - f1) / self.fps
+            if time_delta == 0:
+                speed = 0
+            else:
+                speed = (dist2 - dist1) / time_delta
+
+            car_data["last_speed"] = speed
+            car_data["last_frame_calculated"] = frame
+
+        return car_data["last_speed"]
+
 
 class ImageRedactor: 
     
@@ -59,10 +76,10 @@ class ImageRedactor:
         self.model = YOLO(YOLO_MODEL)
 
         self.tracker = DeepSort(
-            max_age=20,
+            max_age=10,
             n_init=3,
             nms_max_overlap=1.0,
-            max_iou_distance=0.7
+            max_iou_distance=0.5
         )
 
         # Берём классы транспорта из COCO:
@@ -507,6 +524,11 @@ class ImageRedactor:
         print(f"Видео: {video_path}")
         print(f"Размер: {width}x{height}, FPS: {fps}, Всего кадров: {total_frames}")
 
+        # --- ПОДГОТОВКА ВЫХОДНОГО ВИДЕО ---
+        output_path = os.path.join(self.project_dir, "output_tracked.mp4")  # --- SAVE VIDEO ---
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # или 'XVID'
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))  # --- SAVE VIDEO ---
+
         # Попробуем загрузить старый ROI и измерения
         config_file = os.path.join(self.project_dir, "roi_and_measurements.json")
         roi_polygon, edge_index, measurements = self.load_roi_and_measurements(config_file)
@@ -516,6 +538,7 @@ class ImageRedactor:
         if not ret:
             print("Ошибка: не удалось прочитать первый кадр")
             cap.release()
+            out.release()  # --- SAVE VIDEO ---
             return
 
         # --- Работа с ROI ---
@@ -552,7 +575,8 @@ class ImageRedactor:
         # Инициализируем Detecter
         detecter = Detecter(
             def_func=predict_func,
-            fps=cap.get(cv2.CAP_PROP_FPS)
+            fps=cap.get(cv2.CAP_PROP_FPS),
+            n_frames=10  # пересчет скорости каждые 5 кадров
         )
 
         cursor_pos = [0, 0]
@@ -580,7 +604,7 @@ class ImageRedactor:
             masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
 
             # YOLO на ROI
-            result = self.model(masked_frame, conf=0.4)[0]
+            result = self.model(masked_frame, conf=0.2)[0]
             detections = self.get_detections_from_yolo(result)
 
             # Трекинг
@@ -622,16 +646,21 @@ class ImageRedactor:
                 cv2.putText(frame, speed_text, (int(l), int(t)-7),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-
             # Рисуем ROI
             cv2.polylines(frame, [self.roi_polygon], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # --- SAVE VIDEO ---
+            out.write(frame)
 
             cv2.imshow("YOLO + DeepSORT Tracking", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
         cap.release()
+        out.release()  # --- SAVE VIDEO ---
+        print(f"Обработанное видео сохранено в {output_path}")
         cv2.destroyAllWindows()
+
     
     def save_roi_and_measurements(self, filename, roi_polygon, edge_index, measurements):
         data = {
