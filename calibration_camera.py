@@ -5,12 +5,31 @@ import matplotlib.pyplot as plt
 import os
 import math
 import json
+import time
+
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
 
 class ImageRedactor: 
 
     def __init__(self):
+        YOLO_MODEL = "yolo11n.pt"
+        
         self.roi_polygon = []
         self.project_dir = os.path.dirname(__file__)
+
+        self.model = YOLO(YOLO_MODEL)
+
+        self.tracker = DeepSort(
+            max_age=20,
+            n_init=3,
+            nms_max_overlap=1.0,
+            max_iou_distance=0.7
+        )
+
+        # Берём классы транспорта из COCO:
+        # 2 – car, 3 – motorcycle, 5 – bus, 7 – truck
+        self.track_classes = {2, 3, 5, 7}
 
     def build_all_models(self, measurements):
         """
@@ -415,6 +434,24 @@ class ImageRedactor:
         cv2.destroyWindow("Final ROI")
 
         return self.roi_polygon
+
+    # -------------------------------------------------
+    # ФУНКЦИЯ: преобразовать YOLO-детекции → DeepSORT
+    # -------------------------------------------------
+    def get_detections_from_yolo(self, result):
+        dets = []
+        for box in result.boxes:
+            cls = int(box.cls[0])
+            if cls not in self.track_classes:
+                continue
+
+            x1, y1, x2, y2 = box.xyxy[0]
+            conf = float(box.conf[0])
+            w = x2 - x1
+            h = y2 - y1
+
+            dets.append(([x1, y1, w, h], conf, cls))
+        return dets
     
     def open_video(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -470,72 +507,52 @@ class ImageRedactor:
         self.save_roi_and_measurements(config_file, self.roi_polygon, edge_index, measurements)
 
         # --- Построение регрессионной модели ---
-        # predict_func, params = self.build_exp3p_model(measurements)
         predict_func, all_results = self.build_all_models(measurements)
 
-        # --- Финальный просмотр ROI и измерений ---
-        ret, frame = cap.read()  # читаем первый кадр снова для финального просмотра
-        if ret:
-            final_frame = frame.copy()
-            cv2.polylines(final_frame, [self.roi_polygon], isClosed=True, color=(0, 255, 0), thickness=2)
-            
-            # Рисуем точки измерений
-            for zero_pt, points_dict in measurements.items():
-                cv2.circle(final_frame, zero_pt, 7, (0, 128, 255), -1)
-                cv2.putText(final_frame, "Zero", (zero_pt[0]+10, zero_pt[1]-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 128, 255), 2)
-                for pt, dist in points_dict.items():
-                    cv2.circle(final_frame, pt, 6, (0, 255, 255), -1)
-                    cv2.putText(final_frame, f"{dist}m", (pt[0]+10, pt[1]),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cursor_pos = [0, 0]
+        
+        def mouse_move(event, x, y, flags, param):
+            nonlocal cursor_pos
+            if event == cv2.EVENT_MOUSEMOVE:
+                cursor_pos = [x, y]
+        cv2.namedWindow("Final View")
+        cv2.setMouseCallback("Final View", mouse_move)
 
-            cursor_pos = [0, 0]
+        # -------------------------------------------------
+        # ОСНОВНОЙ ЦИКЛ
+        # -------------------------------------------------
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-            def mouse_move(event, x, y, flags, param):
-                nonlocal cursor_pos
-                if event == cv2.EVENT_MOUSEMOVE:
-                    cursor_pos = [x, y]
+            # Маска для ROI
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(mask, [self.roi_polygon], 255)
+            masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
 
-            cv2.namedWindow("Final View")
-            cv2.setMouseCallback("Final View", mouse_move)
+            # YOLO на ROI
+            result = self.model(masked_frame, conf=0.4)[0]
+            detections = self.get_detections_from_yolo(result)
 
-            while True:
-                display_frame = final_frame.copy()
-                # Показываем координаты курсора
-                cv2.putText(display_frame, f"Cursor: ({cursor_pos[0]}, {cursor_pos[1]})",
-                            (cursor_pos[0]+15, cursor_pos[1]-15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                cv2.imshow("Final View", display_frame)
+            # Трекинг
+            tracks = self.tracker.update_tracks(detections, frame=frame)
 
-                key = cv2.waitKey(30) & 0xFF
-                if key == 13:  # Enter
-                    break
+            # Рисуем треки
+            for track in tracks:
+                if not track.is_confirmed():
+                    continue
+                l, t, r, b = track.to_ltrb()
+                cv2.rectangle(frame, (int(l), int(t)), (int(r), int(b)), (0, 255, 0), 2)
+                cv2.putText(frame, f"ID {track.track_id}", (int(l), int(t)-7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0),2)
 
-            cv2.destroyWindow("Final View")
+            # Рисуем ROI
+            cv2.polylines(frame, [self.roi_polygon], isClosed=True, color=(0, 255, 0), thickness=2)
 
+            cv2.imshow("YOLO + DeepSORT Tracking", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
-        # # --- Основной цикл видео ---
-        # frame_count = 0
-        # car_count = 0
-
-        # while True:
-        #     ret, frame = cap.read()
-        #     if not ret:
-        #         break
-
-        #     # Визуализация ROI
-        #     if self.roi_polygon is not None:
-        #         cv2.polylines(frame, [self.roi_polygon], isClosed=True, color=(255, 0, 0), thickness=2)
-        #         cv2.putText(frame, f'ROI ({len(self.roi_polygon)} точек)', 
-        #                     tuple(self.roi_polygon[0]),
-        #                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-
-        #     cv2.imshow('Car Detection', frame)
-        #     key = cv2.waitKey(1) & 0xFF
-        #     if key == ord('q'):
-        #         break
-
-        #     frame_count += 1
 
         cap.release()
         cv2.destroyAllWindows()
@@ -579,7 +596,7 @@ class ImageRedactor:
     
 def main():
     imageRedactor = ImageRedactor()
-    imageRedactor.open_video('./videos/20250517_042707_D1.mp4')
+    imageRedactor.open_video('./videos/20250517_124800_D1.mp4')
 
 if __name__ == "__main__":
     main()
