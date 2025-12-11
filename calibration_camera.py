@@ -6,7 +6,58 @@ import os
 import math
 import json
 
+
+class Detecter:
+    
+    def __init__(
+        self, 
+        def_func: Callable[[int], np.ndarray],
+        params: np.ndarray,
+        fps: float
+    ):
+        self.def_func = def_func
+        self.params = params
+        self.fps = fps
+        self.map_cars: Dict[int, List[Tuple[int, int]]] = {}
+
+    def estimate_speed(self, car_id, y, frame: int) -> Optional[float]:
+        """
+        Оценивает скорость автомобиля по изменению y-координаты.
+        
+        Args:
+            car_id: ID автомобиля
+            
+        Returns:
+            Скорость в м/с или None если недостаточно данных
+        """
+        if car_id not in self.map_cars or len(self.map_cars[car_id]) < 2:
+            return None
+        
+        detections = self.map_cars[car_id]
+        prev_y = detections[-1][0]
+        prev_frame = detections[-1][1]
+        
+        # Вычисляем расстояния
+        prev_distances = self.def_func(prev_y, *self.params)
+        distances = self.def_func(y, *self.params)
+        
+        
+        frame_delta = frame - prev_frame
+        time_delta = frame_delta / self.fps if self.fps > 0 else 1
+        
+        if time_delta == 0:
+            return None
+        
+        distance_delta = distances - prev_distances
+
+        speed = distance_delta / time_delta
+
+        self.map_cars[car_id].append((y, frame))
+        return speed
+      
+
 class ImageRedactor: 
+    
 
     def __init__(self):
         self.roi_polygon = []
@@ -17,6 +68,8 @@ class ImageRedactor:
         Строим несколько моделей (poly, log, exp, rational, sqrt, power) и выбираем лучшую по AIC/BIC
         measurements: { (x0, y0): { (x2, y2): dist } }
         """
+        global detecter
+
         # --- собираем данные ---
         y_pixels, distances_m = [], []
         for zero_pt, points_dict in measurements.items():
@@ -90,7 +143,8 @@ class ImageRedactor:
 
         # --- функция предсказания для лучшей модели по AIC ---
         def predict(y_pixel):
-            return best_aic_model[1]['func'](y_pixel, *best_aic_model[1]['params'])
+            return best_bic_model[1]['func'](y_pixel, *best_bic_model[1]['params'])
+
 
         # --- ДОПОЛНИТЕЛЬНЫЙ график для лучшей модели ---
         y_line = np.linspace(min(y_pixels), max(y_pixels), 300)
@@ -473,6 +527,13 @@ class ImageRedactor:
         # predict_func, params = self.build_exp3p_model(measurements)
         predict_func, all_results = self.build_all_models(measurements)
 
+                # Инициализируем Detecter
+        detecter = Detecter(
+            def_func=all_results['func'],
+            params=all_results['params'],
+            fps=cap.get(cv2.CAP_PROP_FPS)
+        )
+
         # --- Финальный просмотр ROI и измерений ---
         ret, frame = cap.read()  # читаем первый кадр снова для финального просмотра
         if ret:
@@ -575,11 +636,17 @@ class ImageRedactor:
                 measurements[zero_pt][pt] = dist
 
         return roi_polygon, edge_index, measurements
+    
+    def speed_calc(self, id, y, frame) {
+        detecter.map_cars
+        speed
+    }
+
 
     
 def main():
     imageRedactor = ImageRedactor()
-    imageRedactor.open_video('./videos/20250517_042707_D1.mp4')
+    imageRedactor.open_video('./videos/20250517_115048_D1.mp4')
 
 if __name__ == "__main__":
     main()
