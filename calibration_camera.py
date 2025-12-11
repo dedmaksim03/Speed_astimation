@@ -10,7 +10,54 @@ import time
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
+class Detecter:
+    
+    def __init__(
+        self, 
+        def_func,
+        fps
+    ):
+        self.def_func = def_func
+        self.fps = fps
+        self.map_cars = {}
+
+    def estimate_speed(self, car_id, y, frame: int):
+        """
+        Оценивает скорость автомобиля по изменению y-координаты.
+        
+        Args:
+            car_id: ID автомобиля
+            
+        Returns:
+            Скорость в м/с или None если недостаточно данных
+        """
+        if car_id not in self.map_cars or len(self.map_cars[car_id]) < 2:
+            return None
+        
+        detections = self.map_cars[car_id]
+        prev_y = detections[-1][0]
+        prev_frame = detections[-1][1]
+        
+        # Вычисляем расстояния
+        prev_distances = self.def_func(prev_y)
+        distances = self.def_func(y)
+        
+        
+        frame_delta = frame - prev_frame
+        time_delta = frame_delta / self.fps if self.fps > 0 else 1
+        
+        if time_delta == 0:
+            return None
+        
+        distance_delta = distances - prev_distances
+
+        speed = distance_delta / time_delta
+
+        self.map_cars[car_id].append((y, frame))
+        return speed
+
 class ImageRedactor: 
+    
 
     def __init__(self):
         YOLO_MODEL = "yolo11n.pt"
@@ -36,6 +83,8 @@ class ImageRedactor:
         Строим несколько моделей (poly, log, exp, rational, sqrt, power) и выбираем лучшую по AIC/BIC
         measurements: { (x0, y0): { (x2, y2): dist } }
         """
+        global detecter
+
         # --- собираем данные ---
         y_pixels, distances_m = [], []
         for zero_pt, points_dict in measurements.items():
@@ -109,7 +158,8 @@ class ImageRedactor:
 
         # --- функция предсказания для лучшей модели по AIC ---
         def predict(y_pixel):
-            return best_aic_model[1]['func'](y_pixel, *best_aic_model[1]['params'])
+            return best_bic_model[1]['func'](y_pixel, *best_bic_model[1]['params'])
+
 
         # --- ДОПОЛНИТЕЛЬНЫЙ график для лучшей модели ---
         y_line = np.linspace(min(y_pixels), max(y_pixels), 300)
@@ -127,7 +177,6 @@ class ImageRedactor:
         plt.savefig(best_plot_file)
         plt.close()
         print(f"График лучшей модели сохранен в {best_plot_file}")
-
         return predict, results
 
     def find_closest_edge(self, polygon, click_point):
@@ -509,6 +558,12 @@ class ImageRedactor:
         # --- Построение регрессионной модели ---
         predict_func, all_results = self.build_all_models(measurements)
 
+        # Инициализируем Detecter
+        detecter = Detecter(
+            def_func=predict_func,
+            fps=cap.get(cv2.CAP_PROP_FPS)
+        )
+
         cursor_pos = [0, 0]
         
         def mouse_move(event, x, y, flags, param):
@@ -593,7 +648,7 @@ class ImageRedactor:
 
         return roi_polygon, edge_index, measurements
 
-    
+
 def main():
     imageRedactor = ImageRedactor()
     imageRedactor.open_video('./videos/20250517_124800_D1.mp4')
