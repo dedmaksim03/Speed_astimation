@@ -22,38 +22,29 @@ class Detecter:
         self.map_cars = {}
 
     def estimate_speed(self, car_id, y, frame: int):
-        """
-        Оценивает скорость автомобиля по изменению y-координаты.
-        
-        Args:
-            car_id: ID автомобиля
-            
-        Returns:
-            Скорость в м/с или None если недостаточно данных
-        """
-        if car_id not in self.map_cars or len(self.map_cars[car_id]) < 2:
-            return None
+        if car_id not in self.map_cars:
+            self.map_cars[car_id] = [(y, frame)]
+            return None  # скорость ещё не вычисляется на первом кадре
         
         detections = self.map_cars[car_id]
-        prev_y = detections[-1][0]
-        prev_frame = detections[-1][1]
+        prev_y, prev_frame = detections[-1]
         
         # Вычисляем расстояния
         prev_distances = self.def_func(prev_y)
         distances = self.def_func(y)
         
-        
         frame_delta = frame - prev_frame
         time_delta = frame_delta / self.fps if self.fps > 0 else 1
         
         if time_delta == 0:
-            return None
-        
-        distance_delta = distances - prev_distances
+            speed = 0
+        else:
+            distance_delta = distances - prev_distances
+            speed = distance_delta / time_delta
 
-        speed = distance_delta / time_delta
-
+        # Сохраняем текущую позицию
         self.map_cars[car_id].append((y, frame))
+        
         return speed
 
 class ImageRedactor: 
@@ -581,6 +572,8 @@ class ImageRedactor:
             if not ret:
                 break
 
+            current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
             # Маска для ROI
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
             cv2.fillPoly(mask, [self.roi_polygon], 255)
@@ -593,13 +586,42 @@ class ImageRedactor:
             # Трекинг
             tracks = self.tracker.update_tracks(detections, frame=frame)
 
-            # Рисуем треки
+            # Рисуем треки и вычисляем скорость
             for track in tracks:
                 if not track.is_confirmed():
                     continue
+
                 l, t, r, b = track.to_ltrb()
+                track_id = track.track_id
+
+                # Центр bbox
+                y_center = int((t + b) / 2)
+
+                # Рассчитываем скорость
+                speed_m_s = detecter.estimate_speed(track_id, y_center, current_frame)
+
+                # Рисуем bounding box
                 cv2.rectangle(frame, (int(l), int(t)), (int(r), int(b)), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {track.track_id}", (int(l), int(t)-7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0),2)
+
+                # Формируем текст
+                speed_text = f"ID {track_id}"
+                color = (0, 255, 0)  # по умолчанию зеленый
+
+                if speed_m_s is not None:
+                    speed_kmh = speed_m_s * 3.6
+                    speed_text += f" | {speed_kmh:.1f} km/h"
+
+                    if speed_kmh < 50:
+                        color = (0, 255, 0)
+                    elif speed_kmh < 100:
+                        color = (0, 255, 255)
+                    else:
+                        color = (0, 0, 255)
+
+                # Вывод текста над bbox
+                cv2.putText(frame, speed_text, (int(l), int(t)-7),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
 
             # Рисуем ROI
             cv2.polylines(frame, [self.roi_polygon], isClosed=True, color=(0, 255, 0), thickness=2)
@@ -608,12 +630,8 @@ class ImageRedactor:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-
         cap.release()
         cv2.destroyAllWindows()
-        # print(f"\nОбработка завершена! Найдено автомобилей: {car_count}")
-        # return car_count
-
     
     def save_roi_and_measurements(self, filename, roi_polygon, edge_index, measurements):
         data = {
