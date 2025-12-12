@@ -11,39 +11,27 @@ from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 class Detecter:
-    def __init__(self, def_func, fps, n_frames=5):
-        """
-        def_func: функция перевода y-пикселей в метры
-        fps: частота кадров видео
-        n_frames: пересчитывать скорость каждые n кадров
-        """
+    def __init__(self, def_func, fps, n_frames=7):
         self.def_func = def_func
         self.fps = fps
         self.n_frames = n_frames
         self.map_cars = {}
 
     def estimate_speed(self, car_id, y, frame: int):
-        """
-        car_id: ID объекта
-        y: центр bbox по вертикали
-        frame: номер кадра
-        """
         if car_id not in self.map_cars:
             self.map_cars[car_id] = {
                 "positions": [(y, frame)],
                 "last_frame_calculated": frame,
                 "last_speed": None
             }
-            return None  # скорость ещё не вычислена на первом кадре
+            return None
 
         car_data = self.map_cars[car_id]
         car_data["positions"].append((y, frame))
 
-        # Ограничиваем список последних позиций, чтобы не рос бесконечно
         if len(car_data["positions"]) > self.n_frames + 1:
             car_data["positions"].pop(0)
 
-        # Проверяем, нужно ли пересчитать скорость
         if frame - car_data["last_frame_calculated"] >= self.n_frames:
             # Берем первую и последнюю точку из текущего окна
             y1, f1 = car_data["positions"][0]
@@ -65,7 +53,6 @@ class Detecter:
 
 
 class ImageRedactor: 
-    
 
     def __init__(self):
         YOLO_MODEL = "yolo11n.pt"
@@ -77,23 +64,17 @@ class ImageRedactor:
 
         self.tracker = DeepSort(
             max_age=10,
-            n_init=3,
-            nms_max_overlap=1.0,
-            max_iou_distance=0.5
+            n_init=2,
+            nms_max_overlap=0.7,
+            max_iou_distance=0.98
         )
 
-        # Берём классы транспорта из COCO:
         # 2 – car, 3 – motorcycle, 5 – bus, 7 – truck
         self.track_classes = {2, 3, 5, 7}
 
     def build_all_models(self, measurements):
-        """
-        Строим несколько моделей (poly, log, exp, rational, sqrt, power) и выбираем лучшую по AIC/BIC
-        measurements: { (x0, y0): { (x2, y2): dist } }
-        """
         global detecter
 
-        # --- собираем данные ---
         y_pixels, distances_m = [], []
         for zero_pt, points_dict in measurements.items():
             for pt, dist in points_dict.items():
@@ -102,7 +83,6 @@ class ImageRedactor:
         y_pixels = np.array(y_pixels)
         distances_m = np.array(distances_m)
 
-        # --- список моделей: (название, функция, количество параметров) ---
         def poly2(y, a, b, c): return a*y**2 + b*y + c
         def poly3(y, a, b, c, d): return a*y**3 + b*y**2 + c*y + d
         def log1(y, a, b): return a*np.log(y) + b
@@ -140,7 +120,6 @@ class ImageRedactor:
                     "BIC": BIC
                 }
 
-                # --- график ---
                 y_line = np.linspace(min(y_pixels), max(y_pixels), 200)
                 plt.figure(figsize=(8,6))
                 plt.scatter(y_pixels, distances_m, color='red', label='Измерения')
@@ -157,19 +136,15 @@ class ImageRedactor:
             except Exception as e:
                 print(f"Ошибка при подгонке модели {name}: {e}")
 
-        # После выбора лучшей модели по AIC
         best_aic_model = min(results.items(), key=lambda x: x[1]['AIC'])
         best_bic_model = min(results.items(), key=lambda x: x[1]['BIC'])
 
         print(f"Лучшая модель по AIC: {best_aic_model[0]}, параметры: {best_aic_model[1]['params']}")
         print(f"Лучшая модель по BIC: {best_bic_model[0]}, параметры: {best_bic_model[1]['params']}")
 
-        # --- функция предсказания для лучшей модели по AIC ---
         def predict(y_pixel):
             return best_bic_model[1]['func'](y_pixel, *best_bic_model[1]['params'])
 
-
-        # --- ДОПОЛНИТЕЛЬНЫЙ график для лучшей модели ---
         y_line = np.linspace(min(y_pixels), max(y_pixels), 300)
         plt.figure(figsize=(10, 7))
         plt.scatter(y_pixels, distances_m, color='red', label='Измерения')
@@ -196,7 +171,6 @@ class ImageRedactor:
             p1 = polygon[i]
             p2 = polygon[(i + 1) % len(polygon)]
 
-            # расстояние от точки до отрезка
             dist = self.point_to_segment_distance(click_point, p1, p2)
             if dist < min_dist:
                 min_dist = dist
@@ -207,7 +181,6 @@ class ImageRedactor:
 
 
     def point_to_segment_distance(self, p, a, b):
-        # расстояние от точки p до отрезка ab
         px, py = p
         ax, ay = a
         bx, by = b
@@ -274,7 +247,6 @@ class ImageRedactor:
         print("5. Чтобы выбрать новую нулевую точку — снова кликните по прямой")
         print("6. ENTER — завершить")
 
-        # Храним координату полной нулевой точки!
         # { (x0, y0): { (x2, y2): dist } }
         results = {}
         second_points = {}
@@ -293,18 +265,15 @@ class ImageRedactor:
             cv2.polylines(img, [self.roi_polygon], True, (0, 255, 0), 2)
             cv2.line(img, p1, p2, (0, 0, 255), 3)
 
-            # Рисуем только реальные нулевые точки
             for zero_pt, points in second_points.items():
                 cv2.circle(img, zero_pt, 7, (255, 255, 0), -1)
 
                 for (pt, dist) in points:
                     cv2.circle(img, pt, 6, (0, 255, 255), -1)
-                    # ЛИНИИ БОЛЬШЕ НЕ РИСУЕМ
                     cv2.putText(img, f"{dist}m", (pt[0] + 10, pt[1]),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                                 (0, 255, 255), 2)
 
-            # Текущая нулевая точка
             if current_zero_point is not None:
                 cv2.circle(img, current_zero_point, 7, (0, 128, 255), -1)
                 cv2.putText(img, "Zero Point",
@@ -321,11 +290,9 @@ class ImageRedactor:
 
             click_pt = (x, y)
 
-            # Проверяем — попали ли по ребру
             is_on_edge = self.point_to_segment_distance(click_pt, p1, p2) < 6
 
             if is_on_edge:
-                # Всегда создаём новую нулевую точку
                 current_zero_point = click_pt
                 results[current_zero_point] = {}
                 second_points[current_zero_point] = []
@@ -335,7 +302,6 @@ class ImageRedactor:
                 redraw_window()
                 return
 
-            # Иначе — это точка измерения
             if stage == 1:
                 second_point = click_pt
                 print(f"Выбрана вторая точка: {second_point}")
@@ -397,11 +363,9 @@ class ImageRedactor:
                     removed_point = roi_points.pop()
                     print(f"Удалена точка: {removed_point}")
 
-            # === Новый функционал: вывод координат при движении мыши ===
             if event == cv2.EVENT_MOUSEMOVE:
-                print(f"Курсор: ({x}, {y})", end="\r")  # перезапись одной строки
+                print(f"Курсор: ({x}, {y})", end="\r")
 
-            # Перерисовка
             temp_clone = clone.copy()
 
             # Рисуем все точки
@@ -425,7 +389,6 @@ class ImageRedactor:
                 cv2.fillPoly(overlay, [np.array(closed, dtype=np.int32)], (0, 100, 0))
                 cv2.addWeighted(overlay, 0.3, temp_clone, 0.7, 0, temp_clone)
 
-            # === Рисуем текст с координатами возле курсора ===
             if last_mouse_pos is not None:
                 mx, my = last_mouse_pos
                 cv2.putText(temp_clone, f"({mx}, {my})",
@@ -492,9 +455,6 @@ class ImageRedactor:
 
         return self.roi_polygon
 
-    # -------------------------------------------------
-    # ФУНКЦИЯ: преобразовать YOLO-детекции → DeepSORT
-    # -------------------------------------------------
     def get_detections_from_yolo(self, result):
         dets = []
         for box in result.boxes:
@@ -524,7 +484,6 @@ class ImageRedactor:
         print(f"Видео: {video_path}")
         print(f"Размер: {width}x{height}, FPS: {fps}, Всего кадров: {total_frames}")
 
-        # --- ПОДГОТОВКА ВЫХОДНОГО ВИДЕО ---
         output_path = os.path.join(self.project_dir, "output_tracked.mp4")  # --- SAVE VIDEO ---
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # или 'XVID'
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))  # --- SAVE VIDEO ---
@@ -541,7 +500,7 @@ class ImageRedactor:
             out.release()  # --- SAVE VIDEO ---
             return
 
-        # --- Работа с ROI ---
+        # Работа с ROI
         if roi_polygon is not None:
             use_old = input("Найден старый ROI. Использовать его? (y/n): ").strip().lower() == 'y'
             if use_old:
@@ -556,7 +515,7 @@ class ImageRedactor:
             edge_index = self.select_edge(frame)
             self.roi_polygon = user_roi
 
-        # --- Работа с измерениями ---
+        # Работа с измерениями
         if measurements and edge_index is not None:
             use_old = input("Найдены старые измеренные точки. Использовать их? (y/n): ").strip().lower() == 'y'
             if use_old:
@@ -566,17 +525,17 @@ class ImageRedactor:
         else:
             measurements = self.measure_points(frame, edge_index)
 
-        # --- Сохраняем ROI и измерения ---
+        # Сохраняем ROI и измерения
         self.save_roi_and_measurements(config_file, self.roi_polygon, edge_index, measurements)
 
-        # --- Построение регрессионной модели ---
+        # Построение регрессионной модели
         predict_func, all_results = self.build_all_models(measurements)
 
         # Инициализируем Detecter
         detecter = Detecter(
             def_func=predict_func,
             fps=cap.get(cv2.CAP_PROP_FPS),
-            n_frames=10  # пересчет скорости каждые 5 кадров
+            n_frames=12  # пересчет скорости каждые 5 кадров
         )
 
         cursor_pos = [0, 0]
@@ -588,9 +547,6 @@ class ImageRedactor:
         cv2.namedWindow("Final View")
         cv2.setMouseCallback("Final View", mouse_move)
 
-        # -------------------------------------------------
-        # ОСНОВНОЙ ЦИКЛ
-        # -------------------------------------------------
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -598,13 +554,12 @@ class ImageRedactor:
 
             current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
-            # Маска для ROI
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
             cv2.fillPoly(mask, [self.roi_polygon], 255)
             masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
 
-            # YOLO на ROI
-            result = self.model(masked_frame, conf=0.2)[0]
+            # YOLO
+            result = self.model(masked_frame, conf=0.15)[0]
             detections = self.get_detections_from_yolo(result)
 
             # Трекинг
@@ -634,14 +589,8 @@ class ImageRedactor:
                 if speed_m_s is not None:
                     speed_kmh = speed_m_s * 3.6
                     speed_text += f" | {speed_kmh:.1f} km/h"
-
-                    if speed_kmh < 50:
-                        color = (0, 255, 0)
-                    elif speed_kmh < 100:
-                        color = (0, 255, 255)
-                    else:
-                        color = (0, 0, 255)
-
+                    color = (0, 255, 255)
+                
                 # Вывод текста над bbox
                 cv2.putText(frame, speed_text, (int(l), int(t)-7),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -649,7 +598,6 @@ class ImageRedactor:
             # Рисуем ROI
             cv2.polylines(frame, [self.roi_polygon], isClosed=True, color=(0, 255, 0), thickness=2)
 
-            # --- SAVE VIDEO ---
             out.write(frame)
 
             cv2.imshow("YOLO + DeepSORT Tracking", frame)
@@ -657,7 +605,7 @@ class ImageRedactor:
                 break
 
         cap.release()
-        out.release()  # --- SAVE VIDEO ---
+        out.release()
         print(f"Обработанное видео сохранено в {output_path}")
         cv2.destroyAllWindows()
 
@@ -694,7 +642,6 @@ class ImageRedactor:
                 measurements[zero_pt][pt] = dist
 
         return roi_polygon, edge_index, measurements
-
 
 def main():
     imageRedactor = ImageRedactor()
